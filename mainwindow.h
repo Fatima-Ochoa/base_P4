@@ -7,6 +7,24 @@
 #include <QJsonObject>
 #include <QStyle>
 
+// Debajo de tus #include actuales en mainwindow.h:
+#include <QSqlDatabase>
+#include <QSqlQuery>
+#include <QSqlError>
+#include <QStandardPaths>
+#include <QDir>
+#include <QFile>
+
+#include <QStackedWidget>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QLabel>
+#include <QFrame>
+
+class QTabWidget;
+class QTableWidget;
+
+
 class QLineEdit;
 class QSpinBox;
 class QPushButton;
@@ -42,6 +60,14 @@ private slots:
     void alPresionarBarrido();
     void siguientePasoBarrido();
 
+    // Práctica 4: temperatura y SQLite
+    void solicitarTemperatura();
+    void guardarTemperatura(double celsius);
+    void cargarHistorial();
+    void guardarNota();
+
+    void validarLogin();
+
 private:
     void construirInterfaz();
     QPushButton *botonMovimiento(QStyle::StandardPixmap icono, const QString &accion);
@@ -74,6 +100,22 @@ private:
     QPlainTextEdit *m_registro = nullptr;
     QLineSeries *m_serie = nullptr;
     QValueAxis *m_ejeX = nullptr;
+
+    void inicializarBaseDatos();
+    void agregarPestanaTemperatura(QTabWidget *tabs);
+
+    QTimer m_timerAutoTemp;
+    QLabel *m_labelTempActual = nullptr;
+    QCheckBox *m_chkAutoTemp = nullptr;
+    QTableWidget *m_tablaHistorial = nullptr;
+    QLabel *m_labelTotalTemp = nullptr;
+    QSpinBox *m_spinIdTemp = nullptr;
+    QLineEdit *m_lineNotaTemp = nullptr;
+
+    QStackedWidget *stackedWidget;
+    QLineEdit *lineEditPassword;
+    QPushButton *btnEntrar;
+    QLabel *labelErrorPassword;
 };
 
 #endif // MAINWINDOW_H

@@ -5,6 +5,8 @@
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QFrame>
+#include <QStackedWidget>
 #include <QLineEdit>
 #include <QSpinBox>
 #include <QPushButton>
@@ -20,6 +22,17 @@
 #include <QChartView>
 #include <QLineSeries>
 #include <QValueAxis>
+
+#include <QTabWidget>
+#include <QScrollArea>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QStandardPaths>
+#include <QDir>
+#include <QFile>
+#include <QSqlDatabase>
+#include <QSqlQuery>
+#include <QSqlError>
 
 // Contrato con el firmware de la Práctica 2 (practica4.ino de 2026A, puerto 81):
 //   Qt -> ESP32  {"tipo":"latido"}
@@ -44,6 +57,11 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
     construirInterfaz();
+
+    m_timerAutoTemp.setInterval(10000); // 10 s como pide la guía en E3
+    connect(&m_timerAutoTemp, &QTimer::timeout, this, &MainWindow::solicitarTemperatura);
+
+    inicializarBaseDatos();
 
     connect(&m_socket, &QWebSocket::connected, this, &MainWindow::alConectar);
     connect(&m_socket, &QWebSocket::disconnected, this, &MainWindow::alDesconectar);
@@ -173,7 +191,54 @@ void MainWindow::construirInterfaz()
     m_registro->setMaximumHeight(110);
     raiz->addWidget(m_registro);
 
-    setCentralWidget(central);
+    auto *tabs = new QTabWidget(this);
+    tabs->addTab(central, tr("Robot y Distancia"));
+    agregarPestanaTemperatura(tabs);
+
+    stackedWidget = new QStackedWidget(this);
+
+    auto *pageLogin = new QWidget(stackedWidget);
+    auto *gridLogin = new QGridLayout(pageLogin);
+
+    auto *frameLogin = new QFrame(pageLogin);
+    frameLogin->setStyleSheet("background-color: white; border: 1px solid #dbe3ed; border-radius: 12px;");
+    frameLogin->setMaximumSize(360, 280);
+
+    auto *vLogin = new QVBoxLayout(frameLogin);
+    vLogin->setSpacing(12);
+    vLogin->setContentsMargins(20, 20, 20, 20);
+
+    auto *lblTituloLogin = new QLabel(tr("ACCESO RESTRINGIDO · %1").arg(QString::fromUtf8(ALUMNO)), frameLogin);
+    lblTituloLogin->setStyleSheet("font-weight: bold; color: #1F4E79;");
+    lblTituloLogin->setAlignment(Qt::AlignCenter);
+    lblTituloLogin->setWordWrap(true);
+
+    lineEditPassword = new QLineEdit(frameLogin);
+    lineEditPassword->setPlaceholderText(tr("Contraseña..."));
+    lineEditPassword->setEchoMode(QLineEdit::Password);
+
+    btnEntrar = new QPushButton(tr("Ingresar"), frameLogin);
+    btnEntrar->setStyleSheet("background-color: #7c3aed; color: white; font-weight: bold; padding: 10px; border-radius: 8px;");
+
+    labelErrorPassword = new QLabel(frameLogin);
+    labelErrorPassword->setStyleSheet("color: #dc2626; font-size: 12px;");
+    labelErrorPassword->setAlignment(Qt::AlignCenter);
+
+    vLogin->addWidget(lblTituloLogin);
+    vLogin->addWidget(lineEditPassword);
+    vLogin->addWidget(btnEntrar);
+    vLogin->addWidget(labelErrorPassword);
+
+    gridLogin->addWidget(frameLogin, 0, 1);
+
+    stackedWidget->addWidget(pageLogin);
+    stackedWidget->addWidget(tabs);
+    stackedWidget->setCurrentIndex(0);
+    setCentralWidget(stackedWidget);
+
+    connect(btnEntrar, &QPushButton::clicked, this, &MainWindow::validarLogin);
+    connect(lineEditPassword, &QLineEdit::returnPressed, this, &MainWindow::validarLogin);
+
     setWindowTitle(tr("Robot P3 · Android"));
 }
 
@@ -235,6 +300,9 @@ void MainWindow::alDesconectar()
     m_estado->setText(tr("Desconectado"));
     m_conectar->setText(tr("Conectar"));
     registrar(tr("desconectado"));
+    m_timerAutoTemp.stop();
+    if (m_chkAutoTemp)
+        m_chkAutoTemp->setChecked(false);
 }
 
 void MainWindow::alOcurrirError(QAbstractSocket::SocketError)
@@ -265,7 +333,19 @@ void MainWindow::alRecibirMensaje(const QString &texto)
     const QJsonObject obj = QJsonDocument::fromJson(texto.toUtf8()).object();
     const QString tipo = obj.value("tipo").toString();
 
-    if (tipo == "distancia_lectura") {
+    if (tipo == "dht_lectura") {
+        const QJsonValue t = obj.value("temperatura");
+        const bool dhtOk = obj.value("dht_ok").toBool(false);
+        if (!dhtOk || !t.isDouble()) {
+            registrar(tr("Lectura inválida: no se guarda."));
+            return;
+        }
+        const double tempVal = t.toDouble();
+        if (m_labelTempActual) {
+            m_labelTempActual->setText(QStringLiteral("%1 °C").arg(tempVal, 0, 'f', 1));
+        }
+        guardarTemperatura(tempVal);
+    } else if (tipo == "distancia_lectura") {
         agregarDistancia(obj.value("d").toDouble());
     } else if (tipo == "scan") {
         agregarDistancia(obj.value("d").toDouble());
@@ -337,4 +417,227 @@ void MainWindow::agregarDistancia(double cm)
 void MainWindow::registrar(const QString &linea)
 {
     m_registro->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss  ") + linea);
+}
+
+void MainWindow::agregarPestanaTemperatura(QTabWidget *tabs)
+{
+    auto *tabTemp = new QWidget;
+    auto *layoutTab = new QVBoxLayout(tabTemp);
+    layoutTab->setContentsMargins(0, 0, 0, 0);
+
+    auto *scroll = new QScrollArea(tabTemp);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+
+    auto *contenido = new QWidget;
+    auto *lay = new QVBoxLayout(contenido);
+    lay->setSpacing(10);
+    lay->setContentsMargins(10, 10, 10, 10);
+
+    auto *lblInfo = new QLabel(QStringLiteral("ALUMNO: Fatima Ochoa · 220461691 — base: temperatura_1691.db"), contenido);
+    lblInfo->setStyleSheet("font-weight: bold; color: #1F4E79;");
+    lblInfo->setWordWrap(true);
+    lay->addWidget(lblInfo);
+
+    m_labelTempActual = new QLabel(QStringLiteral("--.- °C"), contenido);
+    QFont fTemp = m_labelTempActual->font();
+    fTemp.setPointSize(fTemp.pointSize() + 8);
+    fTemp.setBold(true);
+    m_labelTempActual->setFont(fTemp);
+    m_labelTempActual->setAlignment(Qt::AlignCenter);
+    lay->addWidget(m_labelTempActual);
+
+    auto *filaAccion = new QHBoxLayout;
+    auto *btnLeer = new QPushButton(tr("Leer temperatura"), contenido);
+    m_chkAutoTemp = new QCheckBox(tr("Guardar cada 10 s"), contenido);
+    filaAccion->addWidget(btnLeer);
+    filaAccion->addWidget(m_chkAutoTemp);
+    lay->addLayout(filaAccion);
+
+    connect(btnLeer, &QPushButton::clicked, this, &MainWindow::solicitarTemperatura);
+    connect(m_chkAutoTemp, &QCheckBox::toggled, this, [this](bool activo) {
+        if (activo) {
+            m_timerAutoTemp.start(10000);
+            solicitarTemperatura();
+        } else {
+            m_timerAutoTemp.stop();
+        }
+    });
+
+    m_tablaHistorial = new QTableWidget(0, 4, contenido);
+    m_tablaHistorial->setHorizontalHeaderLabels({tr("ID"), tr("Fecha/Hora"), tr("Temp (°C)"), tr("Nota")});
+    m_tablaHistorial->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_tablaHistorial->setMinimumHeight(180);
+    m_tablaHistorial->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    lay->addWidget(m_tablaHistorial);
+
+    auto *filaTotal = new QHBoxLayout;
+    auto *btnCargar = new QPushButton(tr("Cargar historial"), contenido);
+    m_labelTotalTemp = new QLabel(tr("Mediciones guardadas: 0"), contenido);
+    filaTotal->addWidget(btnCargar);
+    filaTotal->addWidget(m_labelTotalTemp);
+    lay->addLayout(filaTotal);
+    connect(btnCargar, &QPushButton::clicked, this, &MainWindow::cargarHistorial);
+
+    auto *filaNota = new QHBoxLayout;
+    m_spinIdTemp = new QSpinBox(contenido);
+    m_spinIdTemp->setRange(0, 99999);
+    m_lineNotaTemp = new QLineEdit(contenido);
+    m_lineNotaTemp->setPlaceholderText(tr("Nota para el ID seleccionado..."));
+    auto *btnNota = new QPushButton(tr("Guardar nota"), contenido);
+    filaNota->addWidget(new QLabel(tr("ID:"), contenido));
+    filaNota->addWidget(m_spinIdTemp);
+    filaNota->addWidget(m_lineNotaTemp, 1);
+    filaNota->addWidget(btnNota);
+    lay->addLayout(filaNota);
+
+    connect(btnNota, &QPushButton::clicked, this, &MainWindow::guardarNota);
+    connect(m_tablaHistorial, &QTableWidget::cellClicked, this, [this](int fila, int) {
+        if (m_tablaHistorial->item(fila, 0))
+            m_spinIdTemp->setValue(m_tablaHistorial->item(fila, 0)->text().toInt());
+    });
+
+    scroll->setWidget(contenido);
+    layoutTab->addWidget(scroll);
+    tabs->addTab(tabTemp, tr("Temperatura"));
+}
+
+void MainWindow::inicializarBaseDatos()
+{
+    const QString carpeta = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(carpeta);
+
+    const QString ruta = carpeta + "/temperatura_1691.db";
+    const bool yaExistia = QFile::exists(ruta);
+
+    QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE");
+    db.setDatabaseName(ruta);
+
+    if (!db.open()) {
+        registrar(tr("No se abrió la base: %1").arg(db.lastError().text()));
+        return;
+    }
+
+    QSqlQuery consulta;
+    if (!consulta.exec("CREATE TABLE IF NOT EXISTS mediciones ("
+                       "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                       "fecha_hora TEXT NOT NULL, "
+                       "temperatura REAL NOT NULL, "
+                       "fuente TEXT NOT NULL, "
+                       "nota TEXT)")) {
+        registrar(tr("No se creó la tabla: %1").arg(consulta.lastError().text()));
+        return;
+    }
+
+    if (!consulta.exec("CREATE TABLE IF NOT EXISTS accesos ("
+                       "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                       "fecha_hora TEXT NOT NULL, "
+                       "estado TEXT NOT NULL)")) {
+        registrar(tr("No se creó la tabla accesos: %1").arg(consulta.lastError().text()));
+    }
+
+    registrar((yaExistia ? tr("Base encontrada: ") : tr("Base nueva creada: ")) + ruta);
+    cargarHistorial();
+}
+
+void MainWindow::solicitarTemperatura()
+{
+    if (m_socket.state() != QAbstractSocket::ConnectedState)
+        return;
+    enviar({{"tipo", "leer_dht"}});
+}
+
+void MainWindow::guardarTemperatura(double celsius)
+{
+    static const char *FUENTE = "simulada"; // corresponde a SIMULAR_DHT = true en tu firmware
+    const double c1 = qRound(celsius * 10.0) / 10.0;
+
+    QSqlQuery consulta;
+    consulta.prepare("INSERT INTO mediciones (fecha_hora, temperatura, fuente) "
+                     "VALUES (:fecha_hora, :temperatura, :fuente)");
+    consulta.bindValue(":fecha_hora", QDateTime::currentDateTime().toString(Qt::ISODate));
+    consulta.bindValue(":temperatura", c1);
+    consulta.bindValue(":fuente", QString::fromUtf8(FUENTE));
+
+    if (!consulta.exec()) {
+        registrar(tr("INSERT falló: %1").arg(consulta.lastError().text()));
+        return;
+    }
+
+    registrar(tr("Guardada %1 °C con id %2")
+                  .arg(c1, 0, 'f', 1)
+                  .arg(consulta.lastInsertId().toString()));
+    cargarHistorial();
+}
+
+void MainWindow::cargarHistorial()
+{
+    if (!m_tablaHistorial) return;
+
+    m_tablaHistorial->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    QSqlQuery consulta("SELECT id, fecha_hora, temperatura, nota FROM mediciones ORDER BY id DESC LIMIT 50");
+    if (!consulta.isActive()) {
+        registrar(tr("SELECT falló: %1").arg(consulta.lastError().text()));
+        return;
+    }
+
+    m_tablaHistorial->setRowCount(0);
+    while (consulta.next()) {
+        const int fila = m_tablaHistorial->rowCount();
+        m_tablaHistorial->insertRow(fila);
+        m_tablaHistorial->setItem(fila, 0, new QTableWidgetItem(consulta.value(0).toString()));
+        m_tablaHistorial->setItem(fila, 1, new QTableWidgetItem(consulta.value(1).toString()));
+        m_tablaHistorial->setItem(fila, 2, new QTableWidgetItem(QString::number(consulta.value(2).toDouble(), 'f', 1)));
+        m_tablaHistorial->setItem(fila, 3, new QTableWidgetItem(consulta.value(3).toString()));
+    }
+
+    QSqlQuery total("SELECT COUNT(*) FROM mediciones");
+    if (total.next() && m_labelTotalTemp) {
+        m_labelTotalTemp->setText(tr("Mediciones guardadas: %1").arg(total.value(0).toString()));
+    }
+}
+
+void MainWindow::guardarNota()
+{
+    if (!m_spinIdTemp || !m_lineNotaTemp) return;
+    const int idTarget = m_spinIdTemp->value();
+    if (idTarget == 0) {
+        registrar(tr("Primero selecciona un ID válido."));
+        return;
+    }
+
+    QSqlQuery consulta;
+    consulta.prepare("UPDATE mediciones SET nota = :nota WHERE id = :id");
+    consulta.bindValue(":nota", m_lineNotaTemp->text());
+    consulta.bindValue(":id", idTarget);
+
+    if (!consulta.exec()) {
+        registrar(tr("UPDATE falló: %1").arg(consulta.lastError().text()));
+        return;
+    }
+
+    const int afectadas = consulta.numRowsAffected();
+    registrar(tr("UPDATE id %1. Filas cambiadas: %2").arg(idTarget).arg(afectadas));
+    cargarHistorial();
+}
+
+void MainWindow::validarLogin()
+{
+    const QString password = lineEditPassword->text();
+    const bool ok = (password == "micarrito123");
+
+    // Registrar intento en SQLite (temperatura_1691.db)
+    QSqlQuery q;
+    q.prepare("INSERT INTO accesos (fecha_hora, estado) VALUES (:fh, :est)");
+    q.bindValue(":fh", QDateTime::currentDateTime().toString(Qt::ISODate));
+    q.bindValue(":est", ok ? "ACCESO_CONCEDIDO" : "CONTRASENA_INCORRECTA");
+    q.exec();
+
+    if (ok) {
+        labelErrorPassword->clear();
+        stackedWidget->setCurrentIndex(1);
+    } else {
+        labelErrorPassword->setText("Contraseña incorrecta. Intenta de nuevo.");
+        lineEditPassword->clear();
+    }
 }
